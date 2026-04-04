@@ -1,9 +1,10 @@
 # ═══════════════════════════════════════════════════════════════════════════════
 #  BAT 3301 – Colazo – Waiting Lines
-#  M/M/c queues · Shewhart · 3-sigma limits · Interactive Streamlit demo
+#  M/M/c queues · Erlang-C model · Poisson arrivals · exponential service
 # ═══════════════════════════════════════════════════════════════════════════════
 
 import streamlit as st
+import streamlit.components.v1 as components
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -24,7 +25,6 @@ st.markdown("""
 html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 .stApp { background: #ffffff; color: #0f172a; }
 
-/* Tabs */
 .stTabs [data-baseweb="tab-list"] {
     gap: 4px; background: #f8f9fc; border-radius: 8px;
     padding: 4px; border: 1px solid #e2e8f0;
@@ -37,22 +37,16 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
     background: #ffffff !important; color: #1e40af !important;
     font-weight: 600; box-shadow: 0 1px 3px rgba(0,0,0,0.1);
 }
-
-/* Page title */
 .page-title {
     font-size: 26px; font-weight: 800; letter-spacing: -0.8px;
     color: #0f172a; margin-bottom: 2px;
 }
 .page-sub { font-size: 13px; color: #94a3b8; margin-bottom: 20px; }
-
-/* Section header */
 .sec-hdr {
     font-size: 11px; font-weight: 700; letter-spacing: 1.5px;
     color: #94a3b8; text-transform: uppercase;
     border-bottom: 1px solid #e2e8f0; padding-bottom: 7px; margin-bottom: 14px;
 }
-
-/* KPI cards */
 .kpi-card {
     background: #f8f9fc; border: 1px solid #e2e8f0;
     border-top: 3px solid; border-radius: 6px; padding: 12px 14px;
@@ -62,21 +56,15 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
     color: #94a3b8; text-transform: uppercase;
 }
 .kpi-val { font-size: 22px; font-weight: 700; margin-top: 5px; letter-spacing: -0.5px; }
-
-/* Info box */
 .info-box {
     background: #f8f9fc; border: 1px solid #e2e8f0; border-left: 4px solid;
     border-radius: 0 6px 6px 0; padding: 12px 16px;
     font-size: 13px; line-height: 1.75; color: #374151; margin-bottom: 12px;
 }
-
-/* Warning / error */
 .warn-box {
     background: #fef2f2; border: 1px solid #fca5a5; border-radius: 6px;
     padding: 12px 16px; font-size: 13px; color: #7f1d1d;
 }
-
-/* Metric table */
 .metric-tbl { width:100%; border-collapse:collapse; font-size:13px; }
 .metric-tbl th {
     background:#f1f5f9; text-align:left; padding:9px 12px;
@@ -85,8 +73,6 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 .metric-tbl td { padding:8px 12px; border:1px solid #e2e8f0; color:#374151; }
 .metric-tbl tr:nth-child(even) td { background:#f8f9fc; }
 .metric-tbl td.hl { font-weight:700; }
-
-/* Compare table */
 .cmp-tbl { width:100%; border-collapse:collapse; font-size:13px; }
 .cmp-tbl th { background:#f1f5f9; text-align:center; padding:9px 12px; font-weight:600; border:1px solid #e2e8f0; }
 .cmp-tbl td { padding:8px 12px; border:1px solid #e2e8f0; text-align:center; }
@@ -97,354 +83,470 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 """, unsafe_allow_html=True)
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  COLOUR PALETTE
+#  COLOR PALETTE
 # ═══════════════════════════════════════════════════════════════════════════════
-BLUE    = "#2563eb"
-GREEN   = "#16a34a"
-RED     = "#dc2626"
-ORANGE  = "#f97316"
-PURPLE  = "#7c3aed"
-TEAL    = "#0891b2"
-AMBER   = "#d97706"
-GRAY    = "#6b7280"
+BLUE   = "#2563eb"
+GREEN  = "#16a34a"
+RED    = "#dc2626"
+ORANGE = "#f97316"
+PURPLE = "#7c3aed"
+TEAL   = "#0891b2"
+GRAY   = "#6b7280"
 
-SERVER_COLORS = [BLUE, GREEN, PURPLE, TEAL]   # one per server in diagrams
-LANE_COLORS   = [BLUE, ORANGE, GREEN, PURPLE]  # one per parallel lane
+SERVER_COLORS = [BLUE, GREEN, PURPLE, TEAL]
+LANE_COLORS   = [BLUE, ORANGE, GREEN, PURPLE]
 
 def hex_rgba(h, a=0.12):
     h = h.lstrip("#")
-    r,g,b = int(h[0:2],16), int(h[2:4],16), int(h[4:6],16)
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
     return f"rgba({r},{g},{b},{a})"
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  M/M/c MATH
 # ═══════════════════════════════════════════════════════════════════════════════
 def mmc(lam: float, mu: float, c: int) -> dict | None:
-    """Compute all M/M/c steady-state metrics. Returns None if unstable."""
     if lam <= 0 or mu <= 0 or c < 1:
         return None
-    a   = lam / mu          # traffic intensity (Erlang)
-    rho = a / c             # per-server utilisation
+    a   = lam / mu
+    rho = a / c
     if rho >= 1.0:
         return None
-
-    # P₀: probability system empty
     s    = sum(a**n / math.factorial(n) for n in range(c))
     last = a**c / (math.factorial(c) * (1 - rho))
     P0   = 1.0 / (s + last)
-
-    # Erlang-C: probability arriving customer must wait
-    Pw = last * P0
-
-    # Average customers in queue / system
-    Lq = Pw * rho / (1 - rho)
-    Wq = Lq / lam
-    W  = Wq + 1.0 / mu
-    L  = lam * W          # = Lq + a
-    Ls = a                # in service = λ/μ
-
+    Pw   = last * P0
+    Lq   = Pw * rho / (1 - rho)
+    Wq   = Lq / lam
+    W    = Wq + 1.0 / mu
+    L    = lam * W
+    Ls   = a
     return dict(lam=lam, mu=mu, c=c, a=a, rho=rho,
                 P0=P0, Pw=Pw, Lq=Lq, L=L, Ls=Ls, Wq=Wq, W=W)
 
-
 def fmt(v, decimals=4, pct=False, time=False):
-    """Format a metric value for display."""
     if v is None: return "—"
-    if pct:   return f"{v:.2%}"
-    if time:  return f"{v:.4f}"
+    if pct:  return f"{v:.2%}"
+    if time: return f"{v:.4f}"
     return f"{v:.{decimals}f}"
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  QUEUE DIAGRAM BUILDERS
+#  ANIMATED DIAGRAM BUILDERS  (HTML + JS canvas)
+#
+#  Time scale: animation runs at 1 customer/second entering the total system.
+#  Service time in animation = (λ/μ) × 1000 ms  = a × 1000 ms.
+#  Scale label notes the conversion: 1 animation second = 1/λ time units.
 # ═══════════════════════════════════════════════════════════════════════════════
-_FONT = dict(family="Inter, sans-serif", color="#374151")
-_RH   = 0.72    # row height
-_GAP  = 0.35    # gap between rows
+
+def _server_colors_js(n: int) -> str:
+    """Return JS array literal of server colors."""
+    cols = [SERVER_COLORS[i % len(SERVER_COLORS)] for i in range(n)]
+    return "[" + ",".join(f'"{c}"' for c in cols) + "]"
 
 
-def _base_fig(n_rows: int, extra_height: int = 0) -> go.Figure:
-    fig = go.Figure()
-    fig.update_layout(
-        plot_bgcolor="#ffffff", paper_bgcolor="rgba(0,0,0,0)",
-        font=_FONT,
-        xaxis=dict(visible=False, range=[-0.2, 10.5]),
-        yaxis=dict(visible=False, scaleanchor="x", scaleratio=1,
-                   range=[-(n_rows)*(_RH+_GAP)/2 - 0.6,
-                           (n_rows)*(_RH+_GAP)/2 + 0.6]),
-        height=max(220, 110 * n_rows + extra_height),
-        margin=dict(t=8, b=8, l=8, r=8),
-        showlegend=True,
-        legend=dict(orientation="h", y=1.06, x=0.5, xanchor="center",
-                    font=dict(size=12, color="#374151"),
-                    bgcolor="rgba(255,255,255,0.85)"),
-    )
-    return fig
+def anim_mmc_html(lam: float, mu: float, c: int, rho: float) -> str:
+    """
+    Animated M/M/c diagram: single shared queue feeding c servers.
+    One customer enters per animation second (= 1/λ time units).
+    """
+    n_rows   = max(c, 2)
+    H        = n_rows * 110 + 50
+    a_val    = lam / mu
+    svc_ms   = round(a_val * 1000, 1)   # ms per service in animation
+    scale_s  = round(1 / lam, 4)        # real time units per animation second
+    sc_cols  = _server_colors_js(c)
+
+    return f"""<!DOCTYPE html><html><head>
+<style>
+  body {{margin:0;padding:0;background:#fff;font-family:'Inter',sans-serif;}}
+  canvas {{display:block;margin:0 auto;}}
+  #note {{font-size:10px;color:#94a3b8;text-align:center;padding:3px 0 4px;}}
+</style></head><body>
+<canvas id="cv" width="760" height="{H}"></canvas>
+<div id="note">Animation scale: 1 second ≈ {scale_s} time units &nbsp;|&nbsp;
+λ = {lam:.2f} &nbsp;·&nbsp; μ = {mu:.2f} &nbsp;·&nbsp; c = {c} servers &nbsp;·&nbsp; ρ = {rho:.1%}</div>
+<script>
+const W = 760, H = {H};
+const LAM = {lam}, MU = {mu}, C = {c}, RHO = {rho};
+const SPAWN_MS = 1000;
+const SVC_MS   = {svc_ms};
+const COLS = {sc_cols};
+
+// Layout
+const N_ROWS = Math.max(C, 2);
+const ROW_H  = (H - 20) / N_ROWS;
+const CY     = H / 2;
+const serverYs = Array.from({{length: C}}, (_, i) => 10 + ROW_H * i + ROW_H / 2);
+const Q_END = 330, S_X0 = 390, S_X1 = 570;
+
+let servers = new Array(C).fill(null);
+let queue   = [];
+let custs   = [];
+let nextId  = 0, lastSpawn = -99999;
+
+function Customer() {{
+  this.id    = nextId++;
+  this.x     = 5;
+  this.y     = CY;
+  this.tx    = Q_END;
+  this.ty    = CY;
+  this.state = 'arriving';
+  this.sIdx  = -1;
+  this.sEnd  = 0;
+  this.col   = '#f97316';
+}}
+
+function dispatch(now) {{
+  for (let s = 0; s < C; s++) {{
+    if (!servers[s] && queue.length > 0) {{
+      let cu = queue.shift();
+      servers[s] = cu;
+      cu.sIdx = s;
+      cu.tx = (S_X0 + S_X1) / 2;
+      cu.ty = serverYs[s];
+      cu.state = 'to_server';
+    }}
+  }}
+}}
+
+function updateCust(cu, dt, now) {{
+  switch (cu.state) {{
+    case 'arriving':
+      cu.x += 180 * dt;
+      if (cu.x >= Q_END) {{
+        cu.x = Q_END; cu.state = 'queued';
+        queue.push(cu); dispatch(now);
+      }}
+      break;
+    case 'queued': {{
+      let qi = queue.indexOf(cu);
+      let tx = Q_END - 22 * (qi + 1);
+      cu.x += (tx - cu.x) * 10 * dt;
+      break;
+    }}
+    case 'to_server': {{
+      let dx = cu.tx - cu.x, dy = cu.ty - cu.y;
+      let d  = Math.sqrt(dx*dx + dy*dy);
+      if (d < 3) {{
+        cu.x = cu.tx; cu.y = cu.ty;
+        cu.state = 'serving';
+        cu.sEnd  = now + SVC_MS;
+        cu.col   = '#16a34a';
+      }} else {{
+        cu.x += dx/d * 250 * dt;
+        cu.y += dy/d * 250 * dt;
+      }}
+      break;
+    }}
+    case 'serving':
+      if (now >= cu.sEnd) {{
+        cu.state = 'leaving'; cu.col = '#94a3b8';
+        servers[cu.sIdx] = null;
+        dispatch(now);
+      }}
+      break;
+    case 'leaving':
+      cu.x += 220 * dt;
+      if (cu.x > W + 20) cu.state = 'done';
+      break;
+  }}
+}}
+
+function drawStatic(ctx) {{
+  // Arrival line (center)
+  ctx.strokeStyle = '#e2e8f0'; ctx.lineWidth = 1.8;
+  ctx.beginPath(); ctx.moveTo(10, CY); ctx.lineTo(Q_END, CY); ctx.stroke();
+  // Arrowhead
+  ctx.fillStyle = '#94a3b8';
+  ctx.beginPath(); ctx.moveTo(Q_END, CY);
+  ctx.lineTo(Q_END - 10, CY - 5); ctx.lineTo(Q_END - 10, CY + 5); ctx.fill();
+  // λ label
+  ctx.fillStyle = '#374151'; ctx.font = 'bold 12px Inter'; ctx.textAlign = 'left';
+  ctx.fillText('λ = ' + LAM.toFixed(2), 12, CY - 13);
+  // Queue boundary
+  ctx.strokeStyle = '#94a3b8'; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(Q_END, 6); ctx.lineTo(Q_END, H - 6); ctx.stroke();
+  // Queue label
+  ctx.fillStyle = '#94a3b8'; ctx.font = '10px Inter'; ctx.textAlign = 'center';
+  ctx.fillText('Queue', Q_END / 2 + 10, 14);
+
+  for (let i = 0; i < C; i++) {{
+    let sy  = serverYs[i];
+    let col = COLS[i];
+    let r   = parseInt(col.slice(1,3),16), g = parseInt(col.slice(3,5),16), b = parseInt(col.slice(5,7),16);
+    // Fan line
+    ctx.strokeStyle = '#cbd5e1'; ctx.lineWidth = 1; ctx.setLineDash([5,4]);
+    ctx.beginPath(); ctx.moveTo(Q_END, CY); ctx.lineTo(S_X0, sy); ctx.stroke();
+    ctx.setLineDash([]);
+    // Departure line
+    ctx.strokeStyle = '#e2e8f0'; ctx.lineWidth = 1.8;
+    ctx.beginPath(); ctx.moveTo(S_X1, sy); ctx.lineTo(W - 6, sy); ctx.stroke();
+    ctx.fillStyle = '#94a3b8';
+    ctx.beginPath(); ctx.moveTo(W - 6, sy);
+    ctx.lineTo(W - 16, sy - 5); ctx.lineTo(W - 16, sy + 5); ctx.fill();
+    // Server box
+    ctx.strokeStyle = col; ctx.lineWidth = 2.2;
+    ctx.fillStyle   = 'rgba(' + r + ',' + g + ',' + b + ',0.07)';
+    ctx.fillRect(S_X0, sy - 28, S_X1 - S_X0, 56);
+    ctx.strokeRect(S_X0, sy - 28, S_X1 - S_X0, 56);
+    ctx.fillStyle = col; ctx.font = 'bold 12px Inter'; ctx.textAlign = 'center';
+    ctx.fillText('Server ' + (i + 1), (S_X0 + S_X1) / 2, sy - 7);
+    ctx.fillStyle = '#6b7280'; ctx.font = '11px Inter';
+    ctx.fillText('μ = ' + MU.toFixed(2) + '   ρ = ' + (RHO * 100).toFixed(1) + '%',
+                 (S_X0 + S_X1) / 2, sy + 11);
+  }}
+}}
+
+const cv  = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+let prev  = null;
+
+function loop(ts) {{
+  if (!prev) prev = ts;
+  let dt = (ts - prev) / 1000; prev = ts;
+  dt = Math.min(dt, 0.05);
+
+  if (ts - lastSpawn >= SPAWN_MS) {{
+    custs.push(new Customer()); lastSpawn = ts;
+  }}
+  custs.forEach(cu => updateCust(cu, dt, ts));
+  custs = custs.filter(cu => cu.state !== 'done');
+
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, W, H);
+  drawStatic(ctx);
+  custs.forEach(cu => {{
+    ctx.beginPath(); ctx.arc(cu.x, cu.y, 9, 0, Math.PI * 2);
+    ctx.fillStyle = cu.col; ctx.fill();
+    ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 2; ctx.stroke();
+  }});
+  requestAnimationFrame(loop);
+}}
+requestAnimationFrame(loop);
+</script></body></html>"""
 
 
-def _row_y(i: int, n: int) -> float:
-    """y-centre of row i (0-indexed) for n total rows."""
-    return (n - 1) / 2 * (_RH + _GAP) - i * (_RH + _GAP)
+def anim_parallel_html(lanes: list) -> str:
+    """
+    Animated diagram for n independent parallel lanes.
+    Each lane dict: {lam, mu, rho, color, label, spawn_ms}
+    Total arrivals across all lanes sum to ~1 customer/second.
+    """
+    n     = len(lanes)
+    H     = n * 120 + 50
+    total_lam = sum(la["lam"] for la in lanes)
+    scale_s   = round(1 / total_lam, 4) if total_lam > 0 else 1.0
 
+    # Build JS arrays from lanes
+    lams      = "[" + ",".join(str(round(la["lam"],  4)) for la in lanes) + "]"
+    mus       = "[" + ",".join(str(round(la["mu"],   4)) for la in lanes) + "]"
+    rhos      = "[" + ",".join(str(round(la["rho"],  4)) for la in lanes) + "]"
+    spawn_mss = "[" + ",".join(str(round(la["spawn_ms"], 1)) for la in lanes) + "]"
+    colors    = "[" + ",".join(f'"{la["color"]}"' for la in lanes) + "]"
+    labels    = "[" + ",".join(f'"{la["label"]}"' for la in lanes) + "]"
 
-def _add_lane(fig, y, lam, mu, rho, Lq, label, color,
-              show_wait_legend=False, show_serve_legend=False,
-              queue_x_end=4.5, server_x0=5.2, server_x1=7.8,
-              departure_x=9.0):
-    """Draw one complete queue-lane at vertical position y."""
-    nw = min(max(round(Lq + 0.3), 0), 10)  # customers to show in queue
-    ns = rho > 0.05                          # show customer in server?
+    row_h    = (H - 20) / n
+    lane_ys  = "[" + ",".join(str(round(10 + row_h * i + row_h / 2, 1)) for i in range(n)) + "]"
 
-    # ── arrival arrow ──────────────────────────────────────────────────────
-    fig.add_annotation(
-        x=1.2, y=y, ax=0.05, ay=y,
-        xref="x", yref="y", axref="x", ayref="y",
-        text=f"<b>λ={lam:.2f}</b>", showarrow=True,
-        arrowhead=3, arrowwidth=2.5, arrowcolor=GRAY,
-        font=dict(size=10, color=GRAY),
-        xanchor="right", yanchor="middle",
-    )
+    svc_mss = "[" + ",".join(
+        str(round((la["lam"] / la["mu"]) * 1000, 1)) for la in lanes
+    ) + "]"
 
-    # ── queue line ─────────────────────────────────────────────────────────
-    fig.add_shape(type="line",
-        x0=1.25, x1=queue_x_end + 0.1, y0=y, y1=y,
-        line_color="#cbd5e1", line_width=1.8)
+    header_parts = [f'λ{i+1}={la["lam"]:.2f} μ{i+1}={la["mu"]:.2f} ρ{i+1}={la["rho"]:.1%}'
+                    for i, la in enumerate(lanes)]
+    header = "   |   ".join(header_parts)
 
-    # ── waiting customers ──────────────────────────────────────────────────
-    if nw > 0:
-        qx = [queue_x_end - 0.4 * i for i in range(nw)]
-        fig.add_trace(go.Scatter(
-            x=qx, y=[y] * nw, mode="markers",
-            marker=dict(size=14, color=ORANGE,
-                        line=dict(color="white", width=2.5), symbol="circle"),
-            name="Waiting" if show_wait_legend else None,
-            showlegend=show_wait_legend,
-            legendgroup="wait",
-            hovertemplate=f"Waiting customers: {nw} (Lq≈{Lq:.2f})<extra></extra>",
-        ))
+    return f"""<!DOCTYPE html><html><head>
+<style>
+  body {{margin:0;padding:0;background:#fff;font-family:'Inter',sans-serif;}}
+  canvas {{display:block;margin:0 auto;}}
+  #note {{font-size:10px;color:#94a3b8;text-align:center;padding:3px 0 4px;}}
+</style></head><body>
+<canvas id="cv" width="760" height="{H}"></canvas>
+<div id="note">Animation scale: 1 second ≈ {scale_s} time units &nbsp;|&nbsp; {header}</div>
+<script>
+const W = 760, H = {H}, N = {n};
+const LAMS     = {lams};
+const MUS      = {mus};
+const RHOS     = {rhos};
+const SVC_MSS  = {svc_mss};
+const SPAWN_MS = {spawn_mss};
+const COLS     = {colors};
+const LABELS   = {labels};
+const LANE_YS  = {lane_ys};
 
-    # ── queue boundary tick ─────────────────────────────────────────────────
-    fig.add_shape(type="line",
-        x0=queue_x_end + 0.15, x1=queue_x_end + 0.15,
-        y0=y - _RH/2 + 0.05, y1=y + _RH/2 - 0.05,
-        line_color="#94a3b8", line_width=1.5)
+const Q_END = 330, S_X0 = 390, S_X1 = 570;
 
-    # ── connector line queue→server ─────────────────────────────────────────
-    fig.add_shape(type="line",
-        x0=queue_x_end + 0.15, x1=server_x0,
-        y0=y, y1=y,
-        line_color="#94a3b8", line_width=1.5)
+// Per-lane state
+let servers  = new Array(N).fill(null);
+let queues   = Array.from({{length: N}}, () => []);
+let lastSpawn = new Array(N).fill(-99999);
+let allCusts = [];
+let nextId   = 0;
 
-    # ── server box ─────────────────────────────────────────────────────────
-    fig.add_shape(type="rect",
-        x0=server_x0, x1=server_x1,
-        y0=y - _RH/2 + 0.04, y1=y + _RH/2 - 0.04,
-        fillcolor=hex_rgba(color, 0.10),
-        line_color=color, line_width=2.5)
+function Customer(lane) {{
+  this.id    = nextId++;
+  this.lane  = lane;
+  this.x     = 5;
+  this.y     = LANE_YS[lane];
+  this.tx    = Q_END;
+  this.ty    = LANE_YS[lane];
+  this.state = 'arriving';
+  this.sEnd  = 0;
+  this.col   = '#f97316';
+}}
 
-    sx = (server_x0 + server_x1) / 2
-    fig.add_annotation(x=sx, y=y + 0.06,
-        text=f"<b>{label}</b>",
-        showarrow=False, font=dict(size=11, color=color))
-    fig.add_annotation(x=sx, y=y - 0.18,
-        text=f"μ = {mu:.2f} | ρ = {rho:.1%}",
-        showarrow=False, font=dict(size=9.5, color=GRAY))
+function dispatchLane(lane, now) {{
+  if (!servers[lane] && queues[lane].length > 0) {{
+    let cu = queues[lane].shift();
+    servers[lane] = cu;
+    cu.tx = (S_X0 + S_X1) / 2;
+    cu.ty = LANE_YS[lane];
+    cu.state = 'to_server';
+  }}
+}}
 
-    # ── customer in service ────────────────────────────────────────────────
-    if ns:
-        fig.add_trace(go.Scatter(
-            x=[server_x0 + 0.38], y=[y], mode="markers",
-            marker=dict(size=14, color=GREEN,
-                        line=dict(color="white", width=2.5), symbol="circle"),
-            name="In service" if show_serve_legend else None,
-            showlegend=show_serve_legend,
-            legendgroup="serve",
-            hovertemplate=f"In service (ρ={rho:.1%})<extra></extra>",
-        ))
+function updateCust(cu, dt, now) {{
+  let lane = cu.lane;
+  switch (cu.state) {{
+    case 'arriving':
+      cu.x += 180 * dt;
+      if (cu.x >= Q_END) {{
+        cu.x = Q_END; cu.state = 'queued';
+        queues[lane].push(cu); dispatchLane(lane, now);
+      }}
+      break;
+    case 'queued': {{
+      let qi = queues[lane].indexOf(cu);
+      let tx = Q_END - 22 * (qi + 1);
+      cu.x += (tx - cu.x) * 10 * dt;
+      break;
+    }}
+    case 'to_server': {{
+      let dx = cu.tx - cu.x, dy = cu.ty - cu.y;
+      let d  = Math.sqrt(dx*dx + dy*dy);
+      if (d < 3) {{
+        cu.x = cu.tx; cu.y = cu.ty;
+        cu.state = 'serving';
+        cu.sEnd  = now + SVC_MSS[lane];
+        cu.col   = '#16a34a';
+      }} else {{
+        cu.x += dx/d * 250 * dt;
+        cu.y += dy/d * 250 * dt;
+      }}
+      break;
+    }}
+    case 'serving':
+      if (now >= cu.sEnd) {{
+        cu.state = 'leaving'; cu.col = '#94a3b8';
+        servers[lane] = null;
+        dispatchLane(lane, now);
+      }}
+      break;
+    case 'leaving':
+      cu.x += 220 * dt;
+      if (cu.x > W + 20) cu.state = 'done';
+      break;
+  }}
+}}
 
-    # ── departure arrow ─────────────────────────────────────────────────────
-    fig.add_annotation(
-        x=departure_x, y=y, ax=server_x1 + 0.05, ay=y,
-        xref="x", yref="y", axref="x", ayref="y",
-        text="", showarrow=True,
-        arrowhead=3, arrowwidth=2.5, arrowcolor=GRAY,
-    )
+function drawStatic(ctx) {{
+  for (let i = 0; i < N; i++) {{
+    let sy  = LANE_YS[i];
+    let col = COLS[i];
+    let r = parseInt(col.slice(1,3),16), g = parseInt(col.slice(3,5),16), b = parseInt(col.slice(5,7),16);
+    // Arrival line
+    ctx.strokeStyle = '#e2e8f0'; ctx.lineWidth = 1.8;
+    ctx.beginPath(); ctx.moveTo(10, sy); ctx.lineTo(Q_END, sy); ctx.stroke();
+    // Arrowhead at Q_END
+    ctx.fillStyle = '#94a3b8';
+    ctx.beginPath(); ctx.moveTo(Q_END, sy);
+    ctx.lineTo(Q_END-10, sy-5); ctx.lineTo(Q_END-10, sy+5); ctx.fill();
+    // λ label
+    ctx.fillStyle = '#374151'; ctx.font = 'bold 11px Inter'; ctx.textAlign = 'left';
+    ctx.fillText('λ = ' + LAMS[i].toFixed(2), 12, sy - 12);
+    // Queue boundary
+    ctx.strokeStyle = '#94a3b8'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(Q_END, sy - 44); ctx.lineTo(Q_END, sy + 44); ctx.stroke();
+    // Connector to server
+    ctx.strokeStyle = '#e2e8f0'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(Q_END, sy); ctx.lineTo(S_X0, sy); ctx.stroke();
+    // Departure line
+    ctx.beginPath(); ctx.moveTo(S_X1, sy); ctx.lineTo(W - 6, sy); ctx.stroke();
+    ctx.fillStyle = '#94a3b8';
+    ctx.beginPath(); ctx.moveTo(W-6, sy);
+    ctx.lineTo(W-16, sy-5); ctx.lineTo(W-16, sy+5); ctx.fill();
+    // Server box
+    ctx.strokeStyle = col; ctx.lineWidth = 2.2;
+    ctx.fillStyle   = 'rgba(' + r + ',' + g + ',' + b + ',0.07)';
+    ctx.fillRect(S_X0, sy - 28, S_X1 - S_X0, 56);
+    ctx.strokeRect(S_X0, sy - 28, S_X1 - S_X0, 56);
+    ctx.fillStyle = col; ctx.font = 'bold 12px Inter'; ctx.textAlign = 'center';
+    ctx.fillText(LABELS[i], (S_X0+S_X1)/2, sy - 7);
+    ctx.fillStyle = '#6b7280'; ctx.font = '11px Inter';
+    ctx.fillText('μ = ' + MUS[i].toFixed(2) + '   ρ = ' + (RHOS[i]*100).toFixed(1) + '%',
+                 (S_X0+S_X1)/2, sy + 11);
+  }}
+}}
 
+const cv  = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+let prev  = null;
 
-def draw_mmc(m: dict) -> go.Figure:
-    """Single queue feeding c servers (M/M/c)."""
-    c   = m["c"]
-    Lq  = m["Lq"]
-    rho = m["rho"]
-    lam = m["lam"]
-    mu  = m["mu"]
+function loop(ts) {{
+  if (!prev) prev = ts;
+  let dt = (ts - prev) / 1000; prev = ts;
+  dt = Math.min(dt, 0.05);
 
-    fig = _base_fig(max(c, 2))
+  for (let i = 0; i < N; i++) {{
+    if (ts - lastSpawn[i] >= SPAWN_MS[i]) {{
+      allCusts.push(new Customer(i));
+      lastSpawn[i] = ts;
+    }}
+  }}
+  allCusts.forEach(cu => updateCust(cu, dt, ts));
+  allCusts = allCusts.filter(cu => cu.state !== 'done');
 
-    # Arrival arrow (single, at vertical centre)
-    fig.add_annotation(
-        x=1.2, y=0, ax=0.05, ay=0,
-        xref="x", yref="y", axref="x", ayref="y",
-        text=f"<b>λ={lam:.2f}</b>", showarrow=True,
-        arrowhead=3, arrowwidth=2.5, arrowcolor=GRAY,
-        font=dict(size=10, color=GRAY),
-        xanchor="right", yanchor="middle",
-    )
-
-    # Queue line & waiting customers (all in the single queue at y=0)
-    nw = min(max(round(Lq + 0.3), 0), 10)
-    fig.add_shape(type="line",
-        x0=1.25, x1=4.7, y0=0, y1=0,
-        line_color="#cbd5e1", line_width=1.8)
-    if nw > 0:
-        qx = [4.6 - 0.38 * i for i in range(nw)]
-        fig.add_trace(go.Scatter(
-            x=qx, y=[0] * nw, mode="markers",
-            marker=dict(size=14, color=ORANGE,
-                        line=dict(color="white", width=2.5)),
-            name="Waiting", legendgroup="wait",
-            hovertemplate=f"Waiting (Lq≈{Lq:.2f})<extra></extra>",
-        ))
-
-    # Queue boundary
-    fig.add_shape(type="line",
-        x0=4.75, x1=4.75,
-        y0=-(c * (_RH + _GAP) / 2) + 0.1,
-        y1= (c * (_RH + _GAP) / 2) - 0.1,
-        line_color="#94a3b8", line_width=1.5)
-
-    # Fan-out lines from queue to each server
-    for i in range(c):
-        ys = _row_y(i, c)
-        col = SERVER_COLORS[i % len(SERVER_COLORS)]
-        fig.add_shape(type="line",
-            x0=4.75, x1=5.4, y0=0, y1=ys,
-            line_color="#94a3b8", line_width=1.2, line_dash="dot")
-        # Server box
-        fig.add_shape(type="rect",
-            x0=5.4, x1=8.0,
-            y0=ys - _RH/2 + 0.04, y1=ys + _RH/2 - 0.04,
-            fillcolor=hex_rgba(col, 0.10),
-            line_color=col, line_width=2.5)
-        sx = 6.7
-        fig.add_annotation(x=sx, y=ys + 0.07,
-            text=f"<b>Server {i+1}</b>",
-            showarrow=False, font=dict(size=11, color=col))
-        fig.add_annotation(x=sx, y=ys - 0.18,
-            text=f"μ = {mu:.2f} | ρ = {rho:.1%}",
-            showarrow=False, font=dict(size=9.5, color=GRAY))
-        # Customer in service
-        if rho > 0.05:
-            fig.add_trace(go.Scatter(
-                x=[5.75], y=[ys], mode="markers",
-                marker=dict(size=14, color=GREEN,
-                            line=dict(color="white", width=2.5)),
-                name="In service" if i == 0 else None,
-                showlegend=(i == 0),
-                legendgroup="serve",
-                hovertemplate=f"Server {i+1} (ρ={rho:.1%})<extra></extra>",
-            ))
-        # Departure arrow
-        fig.add_annotation(
-            x=9.0, y=ys, ax=8.05, ay=ys,
-            xref="x", yref="y", axref="x", ayref="y",
-            text="", showarrow=True,
-            arrowhead=3, arrowwidth=2.5, arrowcolor=GRAY,
-        )
-
-    return fig
-
-
-def draw_nxmm1(n: int, m_each: dict) -> go.Figure:
-    """n parallel M/M/1 queues (each gets λ/n)."""
-    fig = _base_fig(n)
-    for i in range(n):
-        y   = _row_y(i, n)
-        col = LANE_COLORS[i % len(LANE_COLORS)]
-        _add_lane(fig, y,
-                  lam=m_each["lam"], mu=m_each["mu"],
-                  rho=m_each["rho"], Lq=m_each["Lq"],
-                  label=f"Queue {i+1} / Server {i+1}", color=col,
-                  show_wait_legend=(i == 0),
-                  show_serve_legend=(i == 0))
-    return fig
-
-
-def draw_mmn(m: dict) -> go.Figure:
-    """M/M/n — same drawing as M/M/c but labeled as 'consolidated queue'."""
-    return draw_mmc(m)
-
-
-def draw_express(m1: dict, m2: dict, pct: float) -> go.Figure:
-    """Two-lane express system."""
-    fig = _base_fig(2, extra_height=20)
-
-    # ── Express (fast) lane — row 0 at top ────────────────────────────────
-    y0 = _row_y(0, 2)
-    _add_lane(fig, y0,
-              lam=m1["lam"], mu=m1["mu"],
-              rho=m1["rho"], Lq=m1["Lq"],
-              label="Express Server (fast)", color=BLUE,
-              show_wait_legend=True, show_serve_legend=True)
-
-    # Label for split
-    fig.add_annotation(x=0.55, y=y0 + 0.02,
-        text=f"<b>{pct:.0%}</b>", showarrow=False,
-        font=dict(size=11, color=BLUE))
-
-    # ── Regular (slow) lane — row 1 at bottom ─────────────────────────────
-    y1 = _row_y(1, 2)
-    _add_lane(fig, y1,
-              lam=m2["lam"], mu=m2["mu"],
-              rho=m2["rho"], Lq=m2["Lq"],
-              label="Regular Server (slow)", color=ORANGE,
-              show_wait_legend=False, show_serve_legend=False)
-
-    fig.add_annotation(x=0.55, y=y1 + 0.02,
-        text=f"<b>{1-pct:.0%}</b>", showarrow=False,
-        font=dict(size=11, color=ORANGE))
-
-    # Total λ arrow (left-most)
-    fig.add_annotation(
-        x=0.1, y=(y0 + y1) / 2 + 0.05,
-        text=f"λ<sub>total</sub><br>= {m1['lam']+m2['lam']:.2f}",
-        showarrow=False,
-        font=dict(size=10, color=GRAY),
-        align="center",
-    )
-    fig.add_shape(type="line", x0=0.15, x1=0.6, y0=y0, y1=y0,
-        line_color=BLUE, line_width=2)
-    fig.add_shape(type="line", x0=0.15, x1=0.6, y0=y1, y1=y1,
-        line_color=ORANGE, line_width=2)
-    fig.add_shape(type="line", x0=0.15, x1=0.15, y0=y0, y1=y1,
-        line_color="#94a3b8", line_width=1.5)
-
-    return fig
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, W, H);
+  drawStatic(ctx);
+  allCusts.forEach(cu => {{
+    ctx.beginPath(); ctx.arc(cu.x, cu.y, 9, 0, Math.PI*2);
+    ctx.fillStyle = cu.col; ctx.fill();
+    ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 2; ctx.stroke();
+  }});
+  requestAnimationFrame(loop);
+}}
+requestAnimationFrame(loop);
+</script></body></html>"""
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  SHARED METRIC TABLE BUILDER
+#  METRIC TABLE  (no traffic intensity row; ρ formula adapts to c)
 # ═══════════════════════════════════════════════════════════════════════════════
 def metric_table_html(m: dict, color: str = BLUE) -> str:
+    rho_formula = "ρ = λ / μ" if m["c"] == 1 else "ρ = λ / (c·μ)"
     rows = [
-        ("Arrival rate",             "λ",           fmt(m['lam'],3)),
-        ("Service rate (per server)","μ",            fmt(m['mu'],3)),
-        ("Number of servers",        "c",            str(m['c'])),
-        ("Traffic intensity",        "a = λ / μ",   fmt(m['a'],4)),
-        ("Server utilisation",       "ρ = a / c",   fmt(m['rho'],4,pct=True)),
-        ("Prob. system empty",       "P₀",          fmt(m['P0'],4,pct=True)),
-        ("Prob. customer waits",     "C(c,a)",      fmt(m['Pw'],4,pct=True)),
-        ("Avg. customers in queue",  "Lq",          fmt(m['Lq'],4)),
-        ("Avg. customers in service","Ls = λ/μ",    fmt(m['Ls'],4)),
-        ("Avg. customers in system", "L = Lq + Ls", fmt(m['L'],4)),
-        ("Avg. wait in queue",       "Wq",          fmt(m['Wq'],4,time=True)),
-        ("Avg. time in system",      "W = Wq + 1/μ",fmt(m['W'],4,time=True)),
+        ("Arrival rate",              "λ",              fmt(m["lam"], 3)),
+        ("Service rate (per server)", "μ",              fmt(m["mu"],  3)),
+        ("Number of servers",         "c",              str(m["c"])),
+        ("Server utilization",        rho_formula,      fmt(m["rho"], 4, pct=True)),
+        ("Prob. system empty",        "P₀",             fmt(m["P0"],  4, pct=True)),
+        ("Prob. customer waits",      "C(c, a)",        fmt(m["Pw"],  4, pct=True)),
+        ("Avg. customers in queue",   "Lq",             fmt(m["Lq"],  4)),
+        ("Avg. customers in service", "Ls = λ / μ",     fmt(m["Ls"],  4)),
+        ("Avg. customers in system",  "L = Lq + Ls",    fmt(m["L"],   4)),
+        ("Avg. wait in queue",        "Wq",             fmt(m["Wq"],  4, time=True)),
+        ("Avg. time in system",       "W = Wq + 1/μ",  fmt(m["W"],   4, time=True)),
     ]
-    html = '<table class="metric-tbl"><tr><th>Parameter</th><th>Formula</th><th>Value</th></tr>'
+    html = ('<table class="metric-tbl"><tr>'
+            '<th>Parameter</th><th>Formula</th><th>Value</th></tr>')
     for param, formula, value in rows:
         hl = (' class="hl"' if param.startswith("Avg.")
-              else ' style="color:{};font-weight:600;"'.format(color)
+              else f' style="color:{color};font-weight:600;"'
               if "Prob." in param else "")
-        html += f'<tr><td>{param}</td><td style="color:#64748b;font-family:monospace;">{formula}</td><td{hl}>{value}</td></tr>'
+        html += (f'<tr><td>{param}</td>'
+                 f'<td style="color:#64748b;font-family:monospace;">{formula}</td>'
+                 f'<td{hl}>{value}</td></tr>')
     html += "</table>"
     return html
 
@@ -453,6 +555,7 @@ def kpi(label, value, color):
     return (f'<div class="kpi-card" style="border-top-color:{color};">'
             f'<div class="kpi-label">{label}</div>'
             f'<div class="kpi-val" style="color:{color};">{value}</div></div>')
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  PAGE HEADER
@@ -464,9 +567,6 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  TABS
-# ═══════════════════════════════════════════════════════════════════════════════
 tab1, tab2, tab3 = st.tabs([
     "📊  M/M/1 to M/M/4",
     "🔀  n × M/M/1  vs  M/M/n",
@@ -478,7 +578,6 @@ tab1, tab2, tab3 = st.tabs([
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 with tab1:
     st.markdown('<div class="sec-hdr">Parameters</div>', unsafe_allow_html=True)
-
     inp_col, _, metric_col = st.columns([1.2, 0.08, 2.5])
 
     with inp_col:
@@ -492,7 +591,7 @@ with tab1:
             mu1  = st.number_input("Service rate  μ (customers/unit time)",
                                    value=4.0, min_value=0.01, step=0.5, format="%.2f")
         else:
-            rho1_in = st.slider("Per-server utilisation  ρ", 0.01, 0.99, 0.60, 0.01)
+            rho1_in = st.slider("Per-server utilization  ρ", 0.01, 0.99, 0.60, 0.01)
             mu1     = st.number_input("Service rate  μ (customers/unit time)",
                                       value=4.0, min_value=0.01, step=0.5, format="%.2f")
             lam1 = rho1_in * c_sel * mu1
@@ -510,32 +609,32 @@ with tab1:
                 unsafe_allow_html=True,
             )
         else:
-            color1 = SERVER_COLORS[(c_sel-1) % len(SERVER_COLORS)]
-
-            # KPI row
+            color1 = SERVER_COLORS[(c_sel - 1) % len(SERVER_COLORS)]
             kpi_cols = st.columns(4)
             with kpi_cols[0]:
-                st.markdown(kpi("Utilisation ρ", f"{m1['rho']:.1%}", color1),
+                st.markdown(kpi("Utilization ρ", f"{m1['rho']:.1%}", color1),
                             unsafe_allow_html=True)
             with kpi_cols[1]:
-                st.markdown(kpi("Avg queue  Lq", f"{m1['Lq']:.3f}", ORANGE),
+                st.markdown(kpi("Avg. queue  Lq", f"{m1['Lq']:.3f}", ORANGE),
                             unsafe_allow_html=True)
             with kpi_cols[2]:
-                st.markdown(kpi("Avg system  L", f"{m1['L']:.3f}", GREEN),
+                st.markdown(kpi("Avg. system  L", f"{m1['L']:.3f}", GREEN),
                             unsafe_allow_html=True)
             with kpi_cols[3]:
                 st.markdown(kpi("Wait in queue Wq", f"{m1['Wq']:.4f}", RED),
                             unsafe_allow_html=True)
-
             st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
             st.markdown(metric_table_html(m1, color1), unsafe_allow_html=True)
 
-    # ── Diagram ───────────────────────────────────────────────────────────────
     if m1 is not None:
         st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
-        st.markdown('<div class="sec-hdr">Queue Diagram</div>', unsafe_allow_html=True)
-        st.plotly_chart(draw_mmc(m1), use_container_width=True,
-                        config={"displayModeBar": False})
+        st.markdown('<div class="sec-hdr">Queue Diagram — Dynamic Simulation</div>',
+                    unsafe_allow_html=True)
+        components.html(
+            anim_mmc_html(m1["lam"], m1["mu"], c_sel, m1["rho"]),
+            height=max(c_sel, 2) * 110 + 80,
+            scrolling=False,
+        )
 
         # ── All-c comparison ──────────────────────────────────────────────────
         st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
@@ -547,21 +646,16 @@ with tab1:
             mc = mmc(lam1, mu1, c)
             if mc:
                 comp_rows.append({
-                    "c":   c,
-                    "ρ":   f"{mc['rho']:.1%}",
-                    "P₀":  f"{mc['P0']:.4f}",
-                    "C(c,a)": f"{mc['Pw']:.4f}",
-                    "Lq":  f"{mc['Lq']:.4f}",
-                    "L":   f"{mc['L']:.4f}",
-                    "Wq":  f"{mc['Wq']:.4f}",
-                    "W":   f"{mc['W']:.4f}",
+                    "c": c, "ρ": f"{mc['rho']:.1%}",
+                    "P₀": f"{mc['P0']:.4f}", "C(c,a)": f"{mc['Pw']:.4f}",
+                    "Lq": f"{mc['Lq']:.4f}", "L": f"{mc['L']:.4f}",
+                    "Wq": f"{mc['Wq']:.4f}", "W": f"{mc['W']:.4f}",
                 })
             else:
                 comp_rows.append({
-                    "c": c,
-                    "ρ": f"{lam1/(c*mu1):.3f} ⚠",
-                    "P₀":"unstable","C(c,a)":"—",
-                    "Lq":"—","L":"—","Wq":"—","W":"—",
+                    "c": c, "ρ": f"{lam1/(c*mu1):.3f} ⚠",
+                    "P₀": "unstable", "C(c,a)": "—",
+                    "Lq": "—", "L": "—", "Wq": "—", "W": "—",
                 })
 
         df_comp = pd.DataFrame(comp_rows).set_index("c")
@@ -572,14 +666,11 @@ with tab1:
                         f"color:{color1}; font-weight:700;"] * len(row)
             return [""] * len(row)
 
-        st.dataframe(
-            df_comp.style.apply(_hl_row, axis=1),
-            use_container_width=True, height=190,
-        )
-        st.caption(f"▶ Blue row = current selection (c = {c_sel}). "
+        st.dataframe(df_comp.style.apply(_hl_row, axis=1),
+                     use_container_width=True, height=190)
+        st.caption(f"▶ Highlighted row = current selection (c = {c_sel}). "
                    "Adding servers reduces Lq, L, Wq, and W dramatically.")
 
-        # Bar chart comparison
         valid_cs = [r["c"] for r in comp_rows if r["Lq"] != "—"]
         Lq_vals  = [mmc(lam1, mu1, c)["Lq"] for c in valid_cs]
         L_vals   = [mmc(lam1, mu1, c)["L"]  for c in valid_cs]
@@ -603,6 +694,130 @@ with tab1:
         st.plotly_chart(fig_bar, use_container_width=True,
                         config={"displayModeBar": False})
 
+        # ── Lq and Wq vs ρ curves ─────────────────────────────────────────────
+        st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
+        st.markdown(
+            '<div class="sec-hdr">Lq and Wq as a function of ρ  '
+            '— all c values (μ held constant)</div>',
+            unsafe_allow_html=True,
+        )
+
+        rho_sweep = np.linspace(0.01, 0.995, 300)
+        _curve_layout = dict(
+            plot_bgcolor="#ffffff", paper_bgcolor="rgba(0,0,0,0)",
+            font=dict(family="Inter, sans-serif", size=12),
+            height=290,
+            margin=dict(t=14, b=52, l=62, r=24),
+            xaxis=dict(
+                title="Per-server utilization  ρ",
+                range=[0, 1],
+                gridcolor="#f1f5f9", linecolor="#e2e8f0",
+                tickformat=".0%",
+                tickfont=dict(size=11),
+                title_font=dict(size=13),
+            ),
+            yaxis=dict(
+                gridcolor="#f1f5f9", linecolor="#e2e8f0",
+                tickfont=dict(size=11),
+                title_font=dict(size=13),
+            ),
+            legend=dict(
+                orientation="h", y=1.08, x=0.5, xanchor="center",
+                font=dict(size=12),
+                bgcolor="rgba(255,255,255,0.9)",
+                bordercolor="#e2e8f0", borderwidth=1,
+            ),
+        )
+
+        fig_lq_rho = go.Figure()
+        fig_wq_rho = go.Figure()
+
+        for c in [1, 2, 3, 4]:
+            col_c  = SERVER_COLORS[(c - 1) % len(SERVER_COLORS)]
+            is_sel = (c == c_sel)
+            lq_pts, wq_pts, rp_pts = [], [], []
+            for rho_v in rho_sweep:
+                lam_v = rho_v * c * mu1
+                m_v   = mmc(lam_v, mu1, c)
+                if m_v:
+                    lq_pts.append(m_v["Lq"])
+                    wq_pts.append(m_v["Wq"])
+                    rp_pts.append(rho_v)
+
+            line_style = dict(
+                color=col_c,
+                width=3.0 if is_sel else 1.6,
+                dash="solid" if is_sel else "dot",
+            )
+            label = f"c = {c}  ◀ selected" if is_sel else f"c = {c}"
+            # Lq curve
+            fig_lq_rho.add_trace(go.Scatter(
+                x=rp_pts, y=lq_pts, mode="lines", name=label,
+                line=line_style,
+                hovertemplate=(f"c={c}<br>ρ = %{{x:.1%}}"
+                               f"<br>Lq = %{{y:.4f}}<extra></extra>"),
+            ))
+            # Wq curve
+            fig_wq_rho.add_trace(go.Scatter(
+                x=rp_pts, y=wq_pts, mode="lines", name=label,
+                line=line_style,
+                hovertemplate=(f"c={c}<br>ρ = %{{x:.1%}}"
+                               f"<br>Wq = %{{y:.4f}}<extra></extra>"),
+            ))
+
+        # Current operating point markers
+        fig_lq_rho.add_trace(go.Scatter(
+            x=[m1["rho"]], y=[m1["Lq"]],
+            mode="markers", name=f"Current  (ρ={m1['rho']:.2%})",
+            marker=dict(color=RED, size=11, symbol="circle",
+                        line=dict(color="white", width=2)),
+            hovertemplate=(f"Operating point<br>ρ={m1['rho']:.4f}"
+                           f"<br>Lq={m1['Lq']:.4f}<extra></extra>"),
+        ))
+        fig_wq_rho.add_trace(go.Scatter(
+            x=[m1["rho"]], y=[m1["Wq"]],
+            mode="markers", name=f"Current  (ρ={m1['rho']:.2%})",
+            marker=dict(color=RED, size=11, symbol="circle",
+                        line=dict(color="white", width=2)),
+            hovertemplate=(f"Operating point<br>ρ={m1['rho']:.4f}"
+                           f"<br>Wq={m1['Wq']:.4f}<extra></extra>"),
+        ))
+
+        # Vertical line at current ρ
+        for _fig in [fig_lq_rho, fig_wq_rho]:
+            _fig.add_vline(
+                x=m1["rho"],
+                line_color=RED, line_width=1.2, line_dash="dot",
+                annotation_text=f"  ρ = {m1['rho']:.2%}",
+                annotation_font=dict(size=10, color=RED),
+                annotation_position="top right",
+            )
+
+        fig_lq_rho.update_layout(
+            **_curve_layout,
+            yaxis_title="Avg. queue length  Lq",
+        )
+        fig_wq_rho.update_layout(
+            **_curve_layout,
+            yaxis_title="Avg. wait in queue  Wq",
+        )
+
+        ch1, ch2 = st.columns(2)
+        with ch1:
+            st.plotly_chart(fig_lq_rho, use_container_width=True,
+                            config={"displayModeBar": False})
+        with ch2:
+            st.plotly_chart(fig_wq_rho, use_container_width=True,
+                            config={"displayModeBar": False})
+
+        st.caption(
+            f"Curves show how Lq and Wq grow as per-server utilization ρ → 1, "
+            f"holding μ = {mu1:.2f} fixed (λ varies to achieve each ρ).  "
+            f"Solid line = selected c ({c_sel}).  "
+            f"Red dot = current operating point  "
+            f"(ρ = {m1['rho']:.1%},  Lq = {m1['Lq']:.4f},  Wq = {m1['Wq']:.4f})."
+        )
+
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
 # ║  TAB 2 — n × M/M/1  vs  M/M/n                                           ║
@@ -617,140 +832,146 @@ with tab2:
         mu2  = st.number_input("Service rate per server  μ", value=4.0,
                                min_value=0.01, step=0.5, format="%.2f", key="mu2")
     with ip2_c:
-        n2   = st.selectbox("Number of servers / queues  (n)", [1,2,3,4], index=1,
-                            key="n2")
+        n2   = st.selectbox("Number of servers / queues  (n)", [1, 2, 3, 4],
+                            index=1, key="n2")
 
-    # n × M/M/1: each of n queues gets λ/n
     m2_each = mmc(lam2 / n2, mu2, 1)
-    # M/M/n: single queue, n servers
     m2_mmn  = mmc(lam2, mu2, n2)
 
-    stable_each = m2_each is not None
-    stable_mmn  = m2_mmn  is not None
-
-    if not stable_each:
+    if m2_each is None or m2_mmn is None:
+        rho_val = lam2 / (n2 * mu2)
         st.markdown(
-            f'<div class="warn-box">⚠ n×M/M/1 unstable: '
-            f'ρ = (λ/n)/μ = {lam2/n2:.2f}/{mu2:.2f} = {lam2/(n2*mu2):.3f} ≥ 1</div>',
-            unsafe_allow_html=True,
-        )
-    elif not stable_mmn:
-        st.markdown(
-            f'<div class="warn-box">⚠ M/M/{n2} unstable: '
-            f'ρ = λ/(n·μ) = {lam2:.2f}/({n2}×{mu2:.2f}) = {lam2/(n2*mu2):.3f} ≥ 1</div>',
+            f'<div class="warn-box">⚠ System unstable: '
+            f'ρ = {lam2:.2f}/({n2}×{mu2:.2f}) = {rho_val:.3f} ≥ 1</div>',
             unsafe_allow_html=True,
         )
     else:
-        # ── KPI summary ───────────────────────────────────────────────────────
-        total_L_nxmm1 = n2 * m2_each["L"]
+        total_L_nxmm1  = n2 * m2_each["L"]
         total_Lq_nxmm1 = n2 * m2_each["Lq"]
 
-        st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
         head_a, head_b = st.columns(2)
         with head_a:
-            st.markdown(f'<div class="info-box" style="border-left-color:{ORANGE};">'
-                        f'<b style="color:{ORANGE};">{n2} × M/M/1 — {n2} separate queues</b><br>'
-                        f'Each queue receives λ/n = {lam2:.2f}/{n2} = {lam2/n2:.3f} '
-                        f'arrivals/unit time. Each customer joins one queue and '
-                        f'<em>cannot switch</em> even if another queue is shorter.</div>',
-                        unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="info-box" style="border-left-color:{ORANGE};">'
+                f'<b style="color:{ORANGE};">{n2} × M/M/1 — {n2} separate queues</b><br>'
+                f'Each queue receives λ/n = {lam2:.2f}/{n2} = {lam2/n2:.3f} '
+                f'arrivals/unit time. Customers join one queue and '
+                f'<em>cannot switch</em> even if another is shorter.</div>',
+                unsafe_allow_html=True,
+            )
         with head_b:
-            st.markdown(f'<div class="info-box" style="border-left-color:{BLUE};">'
-                        f'<b style="color:{BLUE};">M/M/{n2} — single shared queue</b><br>'
-                        f'All {lam2:.2f} arrivals join one queue and the next free server '
-                        f'takes the front customer. No lane-switching problem. '
-                        f'Always at least as efficient as {n2}×M/M/1.</div>',
-                        unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="info-box" style="border-left-color:{BLUE};">'
+                f'<b style="color:{BLUE};">M/M/{n2} — single shared queue</b><br>'
+                f'All {lam2:.2f} arrivals join one queue; the next free server '
+                f'takes the front customer. Always at least as efficient as {n2}×M/M/1.</div>',
+                unsafe_allow_html=True,
+            )
 
-        # ── Diagrams ─────────────────────────────────────────────────────────
+        # ── Animated diagrams ─────────────────────────────────────────────────
         diag_a, diag_b = st.columns(2)
+
+        # n×M/M/1 lanes (total = 1 cust/sec → each lane spawns every n*1000ms)
+        nxmm1_lanes = [
+            {
+                "lam":      round(lam2 / n2, 4),
+                "mu":       mu2,
+                "rho":      m2_each["rho"],
+                "color":    LANE_COLORS[i % len(LANE_COLORS)],
+                "label":    f"Queue {i+1} / Server {i+1}",
+                "spawn_ms": 1000 * n2,   # spread total 1/sec across n lanes
+            }
+            for i in range(n2)
+        ]
+
         with diag_a:
-            st.markdown(f'<div class="sec-hdr">{n2} × M/M/1 system</div>',
+            st.markdown(f'<div class="sec-hdr">{n2} × M/M/1 — Dynamic Simulation</div>',
                         unsafe_allow_html=True)
-            st.plotly_chart(draw_nxmm1(n2, m2_each),
-                            use_container_width=True, config={"displayModeBar": False})
+            components.html(
+                anim_parallel_html(nxmm1_lanes),
+                height=n2 * 120 + 80,
+                scrolling=False,
+            )
+
         with diag_b:
-            st.markdown(f'<div class="sec-hdr">M/M/{n2} system</div>',
+            st.markdown(f'<div class="sec-hdr">M/M/{n2} — Dynamic Simulation</div>',
                         unsafe_allow_html=True)
-            st.plotly_chart(draw_mmn(m2_mmn),
-                            use_container_width=True, config={"displayModeBar": False})
+            components.html(
+                anim_mmc_html(m2_mmn["lam"], m2_mmn["mu"], n2, m2_mmn["rho"]),
+                height=max(n2, 2) * 110 + 80,
+                scrolling=False,
+            )
 
         # ── Comparison table ──────────────────────────────────────────────────
         st.markdown('<div class="sec-hdr">Side-by-side comparison</div>',
                     unsafe_allow_html=True)
 
         metrics_list = [
-            ("Utilisation per server",   "ρ",
+            ("Utilization per server",       "ρ",
              f"{m2_each['rho']:.4f}", f"{m2_mmn['rho']:.4f}"),
-            ("Prob. system empty",       "P₀",
+            ("Prob. system empty",           "P₀",
              f"{m2_each['P0']:.4f}", f"{m2_mmn['P0']:.4f}"),
-            ("Prob. customer waits",     "C(c,a)",
+            ("Prob. customer waits",         "C(c,a)",
              f"{m2_each['Pw']:.4f}", f"{m2_mmn['Pw']:.4f}"),
-            ("Avg. customers in queue (each)",  "Lq",
+            ("Avg. customers in queue (each)","Lq",
              f"{m2_each['Lq']:.4f}", f"{m2_mmn['Lq']:.4f}"),
-            ("Avg. customers in system (each)", "L",
+            ("Avg. customers in system (each)","L",
              f"{m2_each['L']:.4f}", f"{m2_mmn['L']:.4f}"),
-            ("★ Total customers in system",     "L_total",
+            ("★ Total customers in system",  "L_total",
              f"{total_L_nxmm1:.4f}", f"{m2_mmn['L']:.4f}"),
-            ("★ Total customers in queue",      "Lq_total",
+            ("★ Total customers in queue",   "Lq_total",
              f"{total_Lq_nxmm1:.4f}", f"{m2_mmn['Lq']:.4f}"),
-            ("Avg. wait in queue",       "Wq",
+            ("Avg. wait in queue",           "Wq",
              f"{m2_each['Wq']:.4f}", f"{m2_mmn['Wq']:.4f}"),
-            ("Avg. time in system",      "W",
+            ("Avg. time in system",          "W",
              f"{m2_each['W']:.4f}", f"{m2_mmn['W']:.4f}"),
         ]
 
-        tbl  = (f'<table class="cmp-tbl">'
-                f'<tr><th>Metric</th><th>Formula</th>'
-                f'<th style="color:{ORANGE};">{n2} × M/M/1</th>'
-                f'<th style="color:{BLUE};">M/M/{n2}</th>'
-                f'<th>Better?</th></tr>')
-
-        for param, formula, v_nxmm1, v_mmn in metrics_list:
+        tbl = (f'<table class="cmp-tbl"><tr><th>Metric</th><th>Formula</th>'
+               f'<th style="color:{ORANGE};">{n2} × M/M/1</th>'
+               f'<th style="color:{BLUE};">M/M/{n2}</th>'
+               f'<th>Better?</th></tr>')
+        for param, formula, v_nx, v_mmn in metrics_list:
             try:
-                a_val = float(v_nxmm1); b_val = float(v_mmn)
-                if b_val < a_val:
-                    cls_a = " class='worse'"; cls_b = " class='better'"
+                a_v, b_v = float(v_nx), float(v_mmn)
+                if b_v < a_v:
+                    cls_a, cls_b = " class='worse'", " class='better'"
                     better = f'<span style="color:{BLUE}">M/M/{n2} ✓</span>'
-                elif a_val < b_val:
-                    cls_a = " class='better'"; cls_b = " class='worse'"
+                elif a_v < b_v:
+                    cls_a, cls_b = " class='better'", " class='worse'"
                     better = f'<span style="color:{ORANGE}">{n2}×M/M/1 ✓</span>'
                 else:
                     cls_a = cls_b = ""; better = "Equal"
             except Exception:
                 cls_a = cls_b = ""; better = "—"
-
-            star = " style='font-weight:700;'" if param.startswith("★") else ""
-            tbl += (f'<tr><td{star}>{param}</td>'
+            bold = " style='font-weight:700;'" if param.startswith("★") else ""
+            tbl += (f'<tr><td{bold}>{param}</td>'
                     f'<td style="color:#64748b;font-family:monospace;">{formula}</td>'
-                    f'<td{cls_a}>{v_nxmm1}</td>'
-                    f'<td{cls_b}>{v_mmn}</td>'
+                    f'<td{cls_a}>{v_nx}</td><td{cls_b}>{v_mmn}</td>'
                     f'<td style="font-size:12px;">{better}</td></tr>')
         tbl += "</table>"
         st.markdown(tbl, unsafe_allow_html=True)
 
-        # Improvement bar chart
-        improvement_Lq = (total_Lq_nxmm1 - m2_mmn["Lq"]) / total_Lq_nxmm1 * 100
-        improvement_Wq = (m2_each["Wq"] - m2_mmn["Wq"]) / m2_each["Wq"] * 100
-
+        imp_Lq = (total_Lq_nxmm1 - m2_mmn["Lq"]) / total_Lq_nxmm1 * 100
+        imp_Wq = (m2_each["Wq"]  - m2_mmn["Wq"])  / m2_each["Wq"]  * 100
         st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
         st.markdown(
             f'<div class="info-box" style="border-left-color:{GREEN};">'
             f'<b style="color:{GREEN};">Pooling effect:</b> '
-            f'The M/M/{n2} single-queue system reduces total queue length (Lq) by '
-            f'<b>{improvement_Lq:.1f}%</b> and waiting time (Wq) by '
-            f'<b>{improvement_Wq:.1f}%</b> compared to {n2} separate M/M/1 queues '
-            f'with the same total capacity.</div>',
+            f'The M/M/{n2} system reduces total queue length (Lq) by '
+            f'<b>{imp_Lq:.1f}%</b> and waiting time (Wq) by '
+            f'<b>{imp_Wq:.1f}%</b> vs {n2} separate M/M/1 queues.</div>',
             unsafe_allow_html=True,
         )
 
         fig_cmp = go.Figure()
-        labels = [f"{n2}×M/M/1", f"M/M/{n2}"]
-        fig_cmp.add_trace(go.Bar(x=labels,
+        fig_cmp.add_trace(go.Bar(
+            x=[f"{n2}×M/M/1", f"M/M/{n2}"],
             y=[total_Lq_nxmm1, m2_mmn["Lq"]],
-            name="Total Lq", marker_color=[ORANGE, BLUE], opacity=0.85,
+            marker_color=[ORANGE, BLUE], opacity=0.85,
             text=[f"{total_Lq_nxmm1:.3f}", f"{m2_mmn['Lq']:.3f}"],
-            textposition="outside"))
+            textposition="outside",
+        ))
         fig_cmp.update_layout(
             plot_bgcolor="#ffffff", paper_bgcolor="rgba(0,0,0,0)",
             font=dict(family="Inter, sans-serif", size=12),
@@ -765,12 +986,11 @@ with tab2:
 
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
-# ║  TAB 3 — Express Lines (2 × M/M/1, split λ)                             ║
+# ║  TAB 3 — Express Lines                                                   ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 with tab3:
     st.markdown('<div class="sec-hdr">Express Line System Parameters</div>',
                 unsafe_allow_html=True)
-
     c3_a, c3_b, c3_c, c3_d = st.columns(4)
     with c3_a:
         lam3_total = st.number_input("Total arrival rate  λ", value=5.0,
@@ -793,28 +1013,23 @@ with tab3:
     m3f = mmc(lam3_fast, mu3_fast, 1)
     m3s = mmc(lam3_slow, mu3_slow, 1)
 
-    err_f = m3f is None
-    err_s = m3s is None
-
-    if err_f or err_s:
+    if m3f is None or m3s is None:
         msgs = []
-        if err_f:
+        if m3f is None:
             msgs.append(f"Express lane unstable: ρ₁ = {lam3_fast:.2f}/{mu3_fast:.2f} = "
                         f"{lam3_fast/mu3_fast:.3f} ≥ 1. Increase μ₁ or reduce λ.")
-        if err_s:
+        if m3s is None:
             msgs.append(f"Regular lane unstable: ρ₂ = {lam3_slow:.2f}/{mu3_slow:.2f} = "
                         f"{lam3_slow/mu3_slow:.3f} ≥ 1. Increase μ₂ or reduce λ.")
         for msg in msgs:
             st.markdown(f'<div class="warn-box">⚠ {msg}</div>',
                         unsafe_allow_html=True)
     else:
-        # ── System-level aggregates ───────────────────────────────────────────
-        L_total   = m3f["L"]  + m3s["L"]
-        Lq_total  = m3f["Lq"] + m3s["Lq"]
-        Wq_avg    = (lam3_fast*m3f["Wq"] + lam3_slow*m3s["Wq"]) / lam3_total
-        W_avg     = (lam3_fast*m3f["W"]  + lam3_slow*m3s["W"])  / lam3_total
+        L_total  = m3f["L"]  + m3s["L"]
+        Lq_total = m3f["Lq"] + m3s["Lq"]
+        Wq_avg   = (lam3_fast * m3f["Wq"] + lam3_slow * m3s["Wq"]) / lam3_total
+        W_avg    = (lam3_fast * m3f["W"]  + lam3_slow * m3s["W"])  / lam3_total
 
-        # KPIs
         kpi_cols = st.columns(4)
         with kpi_cols[0]:
             st.markdown(kpi("Total L (system)", f"{L_total:.3f}", BLUE),
@@ -831,45 +1046,63 @@ with tab3:
 
         st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
 
-        # ── Diagram ───────────────────────────────────────────────────────────
-        st.markdown('<div class="sec-hdr">System Diagram</div>',
+        # ── Animated diagram ──────────────────────────────────────────────────
+        st.markdown('<div class="sec-hdr">System Diagram — Dynamic Simulation</div>',
                     unsafe_allow_html=True)
-        st.plotly_chart(draw_express(m3f, m3s, pct3),
-                        use_container_width=True, config={"displayModeBar": False})
+
+        express_lanes = [
+            {
+                "lam":      round(lam3_fast, 4),
+                "mu":       mu3_fast,
+                "rho":      m3f["rho"],
+                "color":    BLUE,
+                "label":    f"Express Server  ({pct3:.0%})",
+                "spawn_ms": round(1000 / pct3, 1),   # proportional to split
+            },
+            {
+                "lam":      round(lam3_slow, 4),
+                "mu":       mu3_slow,
+                "rho":      m3s["rho"],
+                "color":    ORANGE,
+                "label":    f"Regular Server  ({1-pct3:.0%})",
+                "spawn_ms": round(1000 / (1 - pct3), 1),
+            },
+        ]
+        components.html(
+            anim_parallel_html(express_lanes),
+            height=2 * 120 + 80,
+            scrolling=False,
+        )
 
         # ── Per-lane metrics ──────────────────────────────────────────────────
         st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
         lane_a, lane_b = st.columns(2)
-
         with lane_a:
             st.markdown(f'<div class="sec-hdr">Express Lane '
                         f'({pct3:.0%} of traffic)</div>', unsafe_allow_html=True)
             st.markdown(metric_table_html(m3f, BLUE), unsafe_allow_html=True)
-
         with lane_b:
             st.markdown(f'<div class="sec-hdr">Regular Lane '
                         f'({1-pct3:.0%} of traffic)</div>', unsafe_allow_html=True)
             st.markdown(metric_table_html(m3s, ORANGE), unsafe_allow_html=True)
 
-        # ── System summary table ──────────────────────────────────────────────
+        # ── System summary ────────────────────────────────────────────────────
         st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
         st.markdown('<div class="sec-hdr">System-Level Summary</div>',
                     unsafe_allow_html=True)
-
         sys_rows = [
-            ("Total arrival rate",      "λ",          f"{lam3_total:.3f}"),
-            ("Express lane arrivals",   "λ₁ = p·λ",   f"{lam3_fast:.3f} ({pct3:.0%})"),
-            ("Regular lane arrivals",   "λ₂ = (1−p)·λ",f"{lam3_slow:.3f} ({1-pct3:.0%})"),
-            ("Express server rate",     "μ₁",          f"{mu3_fast:.3f}"),
-            ("Regular server rate",     "μ₂",          f"{mu3_slow:.3f}"),
-            ("Express utilisation",     "ρ₁ = λ₁/μ₁",  f"{m3f['rho']:.4f} = {m3f['rho']:.1%}"),
-            ("Regular utilisation",     "ρ₂ = λ₂/μ₂",  f"{m3s['rho']:.4f} = {m3s['rho']:.1%}"),
-            ("Total Lq (both lanes)",   "Lq₁ + Lq₂",   f"{Lq_total:.4f}"),
-            ("Total L  (both lanes)",   "L₁ + L₂",     f"{L_total:.4f}"),
-            ("Weighted avg Wq",         "Σλᵢ·Wqᵢ / λ", f"{Wq_avg:.4f}"),
-            ("Weighted avg W",          "Σλᵢ·Wᵢ / λ",  f"{W_avg:.4f}"),
+            ("Total arrival rate",       "λ",            f"{lam3_total:.3f}"),
+            ("Express lane arrivals",    "λ₁ = p·λ",     f"{lam3_fast:.3f} ({pct3:.0%})"),
+            ("Regular lane arrivals",    "λ₂ = (1−p)·λ", f"{lam3_slow:.3f} ({1-pct3:.0%})"),
+            ("Express server rate",      "μ₁",           f"{mu3_fast:.3f}"),
+            ("Regular server rate",      "μ₂",           f"{mu3_slow:.3f}"),
+            ("Express utilization",      "ρ₁ = λ₁/μ₁",  f"{m3f['rho']:.4f} = {m3f['rho']:.1%}"),
+            ("Regular utilization",      "ρ₂ = λ₂/μ₂",  f"{m3s['rho']:.4f} = {m3s['rho']:.1%}"),
+            ("Total Lq (both lanes)",    "Lq₁ + Lq₂",   f"{Lq_total:.4f}"),
+            ("Total L  (both lanes)",    "L₁ + L₂",      f"{L_total:.4f}"),
+            ("Weighted avg. Wq",         "Σλᵢ·Wqᵢ / λ", f"{Wq_avg:.4f}"),
+            ("Weighted avg. W",          "Σλᵢ·Wᵢ / λ",  f"{W_avg:.4f}"),
         ]
-
         tbl3 = ('<table class="metric-tbl"><tr>'
                 '<th>Parameter</th><th>Formula</th><th>Value</th></tr>')
         for p, f_, v in sys_rows:
@@ -880,19 +1113,20 @@ with tab3:
         tbl3 += "</table>"
         st.markdown(tbl3, unsafe_allow_html=True)
 
-        # ── Sensitivity: vary split % ─────────────────────────────────────────
+        # ── Sensitivity curve ─────────────────────────────────────────────────
         st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
         st.markdown('<div class="sec-hdr">Sensitivity — Wq vs. Express Split %</div>',
                     unsafe_allow_html=True)
-
         splits   = np.linspace(0.05, 0.95, 80)
         wq_curve = []
         for p in splits:
             mf_ = mmc(p * lam3_total, mu3_fast, 1)
-            ms_ = mmc((1-p) * lam3_total, mu3_slow, 1)
+            ms_ = mmc((1 - p) * lam3_total, mu3_slow, 1)
             if mf_ and ms_:
-                wq_curve.append((p*lam3_total*mf_["Wq"] +
-                                 (1-p)*lam3_total*ms_["Wq"]) / lam3_total)
+                wq_curve.append(
+                    (p * lam3_total * mf_["Wq"] +
+                     (1 - p) * lam3_total * ms_["Wq"]) / lam3_total
+                )
             else:
                 wq_curve.append(None)
 
@@ -900,7 +1134,6 @@ with tab3:
         fig_sens.add_trace(go.Scatter(
             x=splits * 100, y=wq_curve, mode="lines",
             line=dict(color=BLUE, width=2.5),
-            name="Weighted Wq",
             hovertemplate="Split: %{x:.0f}%<br>Wq: %{y:.4f}<extra></extra>",
         ))
         fig_sens.add_vline(x=pct3 * 100,
@@ -910,16 +1143,17 @@ with tab3:
         fig_sens.update_layout(
             plot_bgcolor="#ffffff", paper_bgcolor="rgba(0,0,0,0)",
             font=dict(family="Inter, sans-serif", size=12),
-            height=270,
+            height=270, showlegend=False,
             margin=dict(t=14, b=48, l=60, r=20),
             xaxis=dict(title="% routed to express lane",
                        gridcolor="#f1f5f9", linecolor="#e2e8f0"),
             yaxis=dict(title="Weighted average Wq",
                        gridcolor="#f1f5f9", linecolor="#e2e8f0"),
-            showlegend=False,
         )
         st.plotly_chart(fig_sens, use_container_width=True,
                         config={"displayModeBar": False})
-        st.caption("The curve shows how the weighted average waiting time changes "
-                   "as the split % varies. The red dashed line marks the current setting. "
-                   "Gaps in the curve indicate unstable configurations (ρ ≥ 1).")
+        st.caption(
+            "Curve: weighted average Wq across all express split percentages. "
+            "Red line: current setting. Gaps = unstable configurations (ρ ≥ 1). "
+            "The minimum of the curve is the optimal split."
+        )
